@@ -1,0 +1,31 @@
+#!/bin/sh
+
+cachedir="${XDG_CACHE_HOME:-"$HOME/.cache"}"
+cache="$cachedir/dmenu_run"
+
+[ ! -e "$cachedir" ] && mkdir -p "$cachedir"
+
+if [ "$1" == "-r" ]; then
+	rm "$cache"
+fi
+
+IFS=:
+if stest -dqr -n "$cache" $PATH; then
+	path_with_local=""
+	path_without_local=""
+	IFS=:
+	for dir in $PATH; do
+		if echo "$dir" | grep -q "local"; then
+	        path_with_local="$path_with_local $dir"
+	    else
+	        path_without_local="$path_without_local $dir"
+	    fi
+	done
+	IFS=" "
+	(
+		stest -flx -y "*" $path_with_local | sort -u;
+		stest -flx $path_without_local | sort -u;
+	) | tee "$cache"
+else
+	cat "$cache"
+fi

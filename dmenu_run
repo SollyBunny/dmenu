@@ -1,0 +1,10 @@
+#!/bin/sh
+if [ -f "dmenu.c" ]; then
+    path="./"
+else
+    path=""
+fi
+if [ -z "$SHELL" ]; then
+    SHELL="/bin/sh"
+fi
+"$path"dmenu_path | "$path"dmenu "$@" | "$SHELL" &
