@@ -24,9 +24,10 @@ INCS = -I$(X11INC) -I$(FREETYPEINC)
 LIBS = -L$(X11LIB) -lX11 $(XINERAMALIBS) $(FREETYPELIBS) -lXrender -lm
 
 # flags
-CFLAGS = -std=c99 -pedantic -Wall -D_DEFAULT_SOURCE -D_BSD_SOURCE -D_XOPEN_SOURCE=700 -D_POSIX_C_SOURCE=200809L -DVERSION=\"$(VERSION)\" $(XINERAMAFLAGS) -O4 $(INCS)
+# DEBUGFLAGS = -O0 -g -fsanitize=address -fno-omit-frame-pointer
+CFLAGS = -std=c99 -D_POSIX_C_SOURCE=200809 -pedantic -Wall -DVERSION=\"$(VERSION)\" $(XINERAMAFLAGS) -O4 $(INCS) $(DEBUGFLAGS) 
 # CFLAGS = -std=c99 -pedantic -Wall
-LDFLAGS = $(LIBS)
+LDFLAGS = $(LIBS) $(DEBUGFLAGS)
 
 # compiler and linker
 CC = cc

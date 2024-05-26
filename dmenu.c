@@ -10,6 +10,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#define __USE_MISC
+#include <dirent.h>
+#undef __USE_MISC
+#include <sys/types.h>
+#include <pwd.h>
+
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xproto.h>
@@ -22,11 +28,11 @@
 
 #include "drw.h"
 #include "util.h"
-#include "theme.h"
 
 /* macros */
-#define INTERSECT(x,y,w,h,r)  (MAX(0, MIN((x)+(w),(r).x_org+(r).width)  - MAX((x),(r).x_org)) \
-                             * MAX(0, MIN((y)+(h),(r).y_org+(r).height) - MAX((y),(r).y_org)))
+#define INTERSECT(x, y, w, h, r) \
+	(MAX(0, MIN((x) + (w), (r).x_org + (r).width) - MAX((x), (r).x_org)) \
+	* MAX(0, MIN((y) + (h), (r).y_org + (r).height) - MAX((y), (r).y_org)))
 #define TEXTW(X)              (drw_fontset_getwidth(drw, (X)) + lrpad)
 #define NUMBERSMAXDIGITS      100
 #define NUMBERSBUFSIZE        (NUMBERSMAXDIGITS * 2) + 1
@@ -40,8 +46,10 @@ enum { SchemeNorm, SchemeSel, SchemeNormHighlight, SchemeSelHighlight,
 struct item {
 	char *text;
 	struct item *left, *right;
-	int hp;
 	double distance;
+	unsigned char hp : 1;
+	unsigned char file : 1;
+	unsigned char folder : 1;
 };
 
 static char numbers[NUMBERSBUFSIZE] = "";
@@ -51,8 +59,10 @@ static int bh, mw, mh;
 static int inputw = 0, promptw;
 static int lrpad; /* sum of left and right padding */
 static int ctrlpressed = 0;
+static int filesiz = 0;
 static size_t cursor;
 static struct item *items = NULL;
+static struct item *files = NULL;
 static struct item *matches, *matchend;
 static struct item *prev, *curr, *next, *sel;
 static int mon = -1, screen;
@@ -76,31 +86,73 @@ static int (*fstrncmp)(const char *, const char *, size_t) = strncmp;
 static char *(*fstrstr)(const char *, const char *) = strstr;
 static void xinitvisual();
 
-static unsigned int
-textw_clamp(const char *str, unsigned int n)
-{
+static unsigned int textw_clamp(const char *str, unsigned int n) {
 	unsigned int w = drw_fontset_getwidth_clamp(drw, str, n) + lrpad;
 	return MIN(w, n);
 }
 
-static void
-appenditem(struct item *item, struct item **list, struct item **last)
-{
+static void freefilenames() {
+	if (!files) return;
+	for (struct item *it = files; it && it->text; ++it) {
+		free(it->text);
+		it->text = NULL;
+	}
+}
+
+static void readfolder(const char *path) {
+	struct dirent *ent = NULL;
+	struct item *it = NULL;
+	DIR *dir = opendir(path);
+	int i = 0;
+	if (!dir) return;
+	if (files) {
+		freefilenames();
+	} else {
+		filesiz = 16;
+		if (!(files = malloc(filesiz * sizeof(*files))))
+			die("cannot realloc %zu bytes:", filesiz * sizeof(*files));
+	}
+	while ((ent = readdir(dir))) {
+		if (ent->d_name[0] == '\0') continue;
+		if (ent->d_name[0] == '.') {
+			if (ent->d_name[1] == '.') {
+				if (ent->d_name[2] == '\0') continue;
+			} else if (ent->d_name[1] == '\0') continue;
+		}
+		// TODO recursivly search sub folders
+		if (i + 1 >= filesiz) {
+			filesiz += 16;
+			if (!(files = realloc(files, filesiz * sizeof(*files))))
+				die("cannot realloc %zu bytes:", filesiz * sizeof(*files));
+		}
+		it = files + i;
+		it->text = strdup(ent->d_name);
+		it->left = NULL;
+		it->right = NULL;
+		it->distance = 0;
+		it->hp = 0;
+		it->file = 1;
+		it->folder = ent->d_type == DT_DIR;
+		i += 1;
+	}
+	it = files + i;
+	it->text = NULL;
+
+	closedir(dir);
+}
+
+static void appenditem(struct item *item, struct item **list, struct item **last) {
 	if (*last)
 		(*last)->right = item;
 	else
 		*list = item;
-
 	item->left = *last;
 	item->right = NULL;
 	*last = item;
 }
 
-static void
-calcoffsets(void)
-{
+static void calcoffsets(void) {
 	int i, n;
-
 	if (lines > 0)
 		n = lines * columns * bh;
 	else
@@ -114,54 +166,42 @@ calcoffsets(void)
 			break;
 }
 
-static int
-max_textw(void)
-{
+static int max_textw(void) {
 	int len = 0;
 	for (struct item *item = items; item && item->text; item++)
 		len = MAX(TEXTW(item->text), len);
 	return len;
 }
 
-static void
-cleanup(void)
-{
+static void cleanup(void) {
 	size_t i;
-
 	XUngrabKey(dpy, AnyKey, AnyModifier, root);
 	for (i = 0; i < SchemeLast; i++)
 		free(scheme[i]);
 	for (i = 0; items && items[i].text; ++i)
 		free(items[i].text);
 	free(items);
+	freefilenames();
+	free(files);
 	drw_free(drw);
 	XSync(dpy, False);
 	XCloseDisplay(dpy);
 }
 
-static char *
-cistrstr(const char *h, const char *n)
-{
+static char *cistrstr(const char *h, const char *n) {
 	size_t i;
-
-	if (!n[0])
-		return (char *)h;
-
+	if (!n[0]) return (char *)h;
 	for (; *h; ++h) {
-		for (i = 0; n[i] && tolower((unsigned char)n[i]) ==
-		            tolower((unsigned char)h[i]); ++i)
-			;
+		for (i = 0; n[i] && tolower((unsigned char)n[i]) == tolower((unsigned char)h[i]); ++i) {}
 		if (n[i] == '\0')
 			return (char *)h;
 	}
 	return NULL;
 }
 
-static int
-drawitem(struct item *item, int x, int y, int w)
-{
+static int drawitem(struct item *item, char *search, int x, int y, int w) {
 	char *itemtext = item->text;
-	char *inputtext = text;
+	char *inputtext = search;
 	char temp[2] = " ";
 	int ellipsis_w = TEXTW("...") - lrpad;
 	int tw = TEXTW(itemtext) - lrpad;
@@ -197,9 +237,7 @@ drawitem(struct item *item, int x, int y, int w)
 	return x;
 }
 
-static void
-recalculatenumbers()
-{
+static void recalculatenumbers() {
 	unsigned int numer = 0, denom = 0;
 	struct item *item;
 	if (matchend) {
@@ -212,9 +250,7 @@ recalculatenumbers()
 	snprintf(numbers, NUMBERSBUFSIZE, "%d/%d", numer, denom);
 }
 
-static void
-drawmenu(void)
-{
+static void drawmenu(void) {
 	unsigned int curpos;
 	struct item *item;
 	int x = 0, y = 0, w;
@@ -237,6 +273,17 @@ drawmenu(void)
 		drw_rect(drw, x + curpos, 2, 2, bh - 4, 1, 0);
 	}
 
+	// TODO put all of this into configs
+	char *search = text;
+	if (1) {
+		char *lastword = search;
+		for (/* empty */; *search; ++search) {
+			if (*search == ' ') lastword = search + 1;
+			else if (*search == '/') lastword = search + 1;
+		}
+		search = lastword;
+	}
+
 	recalculatenumbers();
 	if (lines > 0) {
 		w += x;
@@ -251,7 +298,7 @@ drawmenu(void)
 		int i = 0;
 		for (item = curr; item != next; item = item->right, i++)
 			drawitem(
-				item,
+				item, search,
 				((i / lines) *  ((mw - x) / tempcolumns)),
 				y + (((i % lines) + 1) * bh),
 				(mw - x) / tempcolumns
@@ -266,7 +313,7 @@ drawmenu(void)
 		}
 		x += w;
 		for (item = curr; item != next; item = item->right)
-			x = drawitem(item, x, 0, textw_clamp(item->text, mw - x - TEXTW(">") - TEXTW(numbers)));
+			x = drawitem(item, search, x, 0, textw_clamp(item->text, mw - x - TEXTW(">") - TEXTW(numbers)));
 		if (next) {
 			w = TEXTW(">");
 			drw_setscheme(drw, scheme[SchemeNorm]);
@@ -278,9 +325,7 @@ drawmenu(void)
 	drw_map(drw, win, 0, 0, mw, mh);
 }
 
-static void
-grabfocus(void)
-{
+static void grabfocus(void) {
 	struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000  };
 	Window focuswin;
 	int i, revertwin;
@@ -295,9 +340,7 @@ grabfocus(void)
 	die("cannot grab focus");
 }
 
-static void
-grabkeyboard(void)
-{
+static void grabkeyboard(void) {
 	struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000  };
 	int i;
 
@@ -313,65 +356,103 @@ grabkeyboard(void)
 	die("cannot grab keyboard");
 }
 
-int
-compare_distance(const void *a, const void *b)
-{
+int compare_distance(const void *a, const void *b) {
 	struct item *da = *(struct item **) a;
 	struct item *db = *(struct item **) b;
-
-	if (!db)
-		return 1;
-	if (!da)
-		return -1;
-
+	if (!db) return 1;
+	if (!da) return -1;
 	return da->distance == db->distance ? 0 : da->distance < db->distance ? -1 : 1;
 }
 
-void
-fuzzymatch(void)
-{
+static inline void fuzzymatchdoitem(char *search, int search_len, struct item *it, int *number_of_matches) {
+	int itext_len;
+	char c;
+	int i, pidx, eidx, sidx;
+	if (search_len) {
+		itext_len = strlen(it->text);
+		pidx = 0; /* pointer */
+		sidx = eidx = -1; /* start of match, end of match */
+		/* walk through item text */
+		for (i = 0; i < itext_len && (c = it->text[i]); i++) {
+			/* fuzzy match pattern */
+			if (!fstrncmp(&search[pidx], &c, 1)) {
+				if(sidx == -1)
+					sidx = i;
+				pidx++;
+				if (pidx == search_len) {
+					eidx = i;
+					break;
+				}
+			}
+		}
+		/* build list of matches */
+		if (eidx != -1) {
+			/* compute distance */
+			/* add penalty if match starts late (log(sidx+2)) */
+			/* add penalty for long a match without many matching characters */
+			it->distance = log(sidx + 2) + (double)(eidx - sidx - search_len);
+			/* remove distance if high priority */
+			if (it->hp) it->distance -= hpcost;
+			/* fprintf(stderr, "distance %s %f\n", it->text, it->distance); */
+			appenditem(it, &matches, &matchend);
+			(*number_of_matches)++;
+		}
+	} else {
+		appenditem(it, &matches, &matchend);
+	}
+}
+
+void fuzzymatch(void) {
 	/* bang - we have so much memory */
 	struct item *it;
 	struct item **fuzzymatches = NULL;
-	char c;
-	int number_of_matches = 0, i, pidx, sidx, eidx;
-	int text_len = strlen(text), itext_len;
+	int number_of_matches = 0, i;
+
+	// TODO put all of this into configs
+	char *search = text;
+	int search_len;
+	if (1) {
+		char *lastword = search;
+		for (/* empty */; *search; ++search) {
+			if (*search == ' ') lastword = search + 1;
+		}
+		search = lastword;
+	}
+	search_len = strlen(search);
 
 	matches = matchend = NULL;
 
 	/* walk through all items */
-	for (it = items; it && it->text; it++) {
-		if (text_len) {
-			itext_len = strlen(it->text);
-			pidx = 0; /* pointer */
-			sidx = eidx = -1; /* start of match, end of match */
-			/* walk through item text */
-			for (i = 0; i < itext_len && (c = it->text[i]); i++) {
-				/* fuzzy match pattern */
-				if (!fstrncmp(&text[pidx], &c, 1)) {
-					if(sidx == -1)
-						sidx = i;
-					pidx++;
-					if (pidx == text_len) {
-						eidx = i;
-						break;
-					}
-				}
-			}
-			/* build list of matches */
-			if (eidx != -1) {
-				/* compute distance */
-				/* add penalty if match starts late (log(sidx+2)) */
-				/* add penalty for long a match without many matching characters */
-				it->distance = log(sidx + 2) + (double)(eidx - sidx - text_len);
-				/* remove distance if high priority */
-				if (it->hp) it->distance -= hpcost;
-				/* fprintf(stderr, "distance %s %f\n", it->text, it->distance); */
-				appenditem(it, &matches, &matchend);
-				number_of_matches++;
-			}
+	for (it = items; it && it->text; ++it) {
+		fuzzymatchdoitem(search, search_len, it, &number_of_matches);
+	}
+
+	/* walk through directory */
+	if (1) {
+		char *path = NULL;
+		char *lastslash = NULL;
+		for (char *c = search; *c; ++c) {
+			if (*c == '/')
+				lastslash = c;
+		}
+		if (search[0] == '/') {
+			path = "/";
 		} else {
-			appenditem(it, &matches, &matchend);
+			if ((path = getenv("HOME")) == NULL)
+				if ((path = getpwuid(getuid())->pw_dir) == NULL)
+					path = "/";
+		}
+		if (lastslash) {
+			static char buf[512];
+			snprintf(buf, sizeof(buf), "%s/%.*s", path, (int)(lastslash - search), search);
+			path = buf;
+			if (!path) path = "/";
+			search = lastslash + 1;
+			search_len = strlen(search);
+		}
+		readfolder(path);
+		for (it = files; it && it->text; ++it) {
+			fuzzymatchdoitem(search, search_len, it, &number_of_matches);
 		}
 	}
 
@@ -386,8 +467,9 @@ fuzzymatch(void)
 		qsort(fuzzymatches, number_of_matches, sizeof(struct item*), compare_distance);
 		/* rebuild list of matches */
 		matches = matchend = NULL;
-		for (i = 0, it = fuzzymatches[i];  i < number_of_matches && it && \
-				it->text; i++, it = fuzzymatches[i]) {
+		for (i = 0; i < number_of_matches; ++i) {
+			it = fuzzymatches[i];
+			if (!it || !it->text) continue;
 			appenditem(it, &matches, &matchend);
 		}
 		free(fuzzymatches);
@@ -396,9 +478,7 @@ fuzzymatch(void)
 	calcoffsets();
 }
 
-static void
-match(void)
-{
+static void match(void) {
 	if (fuzzy) {
 		fuzzymatch();
 		return;
@@ -454,36 +534,28 @@ match(void)
 	calcoffsets();
 }
 
-static void
-insert(const char *str, ssize_t n)
-{
-	if (strlen(text) + n > sizeof text - 1)
-		return;
+static void insert(const char *str, ssize_t n) {
+	int text_len = strnlen(text, sizeof text - 1);
+	if (text_len + n > sizeof text - 1) return;
 	if (n < 0) {
-		memmove(&text[cursor + n], &text[cursor], sizeof text - cursor + 1);
+		memmove(&text[cursor + n], &text[cursor], text_len - cursor - n);
 	} else {
 		/* move existing text out of the way, insert new text, and update cursor */
-		memmove(&text[cursor + n], &text[cursor], sizeof text - cursor - n);
+		memmove(&text[cursor + n], &text[cursor], text_len - cursor + n);
 		memcpy(&text[cursor], str, n);
 	}
 	cursor += n;
 	match();
 }
 
-static size_t
-nextrune(int inc)
-{
+static size_t nextrune(int inc) {
 	ssize_t n;
-
 	/* return location of next utf8 rune in the given direction (+1 or -1) */
-	for (n = cursor + inc; n + inc >= 0 && (text[n] & 0xc0) == 0x80; n += inc)
-		;
+	for (n = cursor + inc; n + inc >= 0 && (text[n] & 0xc0) == 0x80; n += inc) {}
 	return n;
 }
 
-static void
-movewordedge(int dir)
-{
+static void movewordedge(int dir) {
 	if (dir < 0) { /* move cursor to the start of the word*/
 		while (cursor > 0 && strchr(worddelimiters, text[nextrune(-1)]))
 			cursor = nextrune(-1);
@@ -497,8 +569,7 @@ movewordedge(int dir)
 	}
 }
 
-static void
-docommand(char *cmd, int terminal) {
+static void docommand(char *cmd, int terminal) {
 	if (terminal) {
 		int format = 0;
 		for (char *p = TERMFORMAT; *p != '\0'; ++p) {
@@ -531,9 +602,7 @@ docommand(char *cmd, int terminal) {
 	putchar('\n');
 }
 
-static void
-keypress(XKeyEvent *ev)
-{
+static void keypress(XKeyEvent *ev) {
 	char buf[64];
 	int len;
 	KeySym ksym = NoSymbol;
@@ -783,10 +852,31 @@ insert:
 		}
 		break;
 	case XK_Tab:
-		if (!sel)
-			return;
-		cursor = strnlen(sel->text, sizeof text - 1);
-		memcpy(text, sel->text, cursor);
+		if (!sel || matches == NULL) { addspace: (void)0;
+			int text_len = strlen(text);
+			if (cursor != text_len) break;
+			if (text[text_len - 1] != ' ')
+				insert(" ", 1);
+			break;
+		}
+		char *lastslash = NULL;
+		for (char *c = text; *c; ++c) {
+			if (*c == ' ') lastslash = c;
+			else if (*c == '/') lastslash = c;
+		}
+		lastslash = lastslash ? lastslash + 1 : text;
+		if (strcmp(matches->text, lastslash) == 0) goto addspace;
+		if (sel->file) {
+			memcpy(lastslash, sel->text, strlen(sel->text));
+			cursor = strnlen(text, sizeof text - 1);
+			if (sel->folder) {
+				memcpy(text + cursor, "/", 1);
+				cursor += 1;
+			}
+		} else {
+			memcpy(lastslash, sel->text, strlen(sel->text));
+			cursor = strnlen(text, sizeof text - 1);
+		}
 		text[cursor] = '\0';
 		match();
 		break;
@@ -796,9 +886,7 @@ draw:
 	drawmenu();
 }
 
-static void
-keyrelease(XKeyEvent *ev)
-{
+static void keyrelease(XKeyEvent *ev) {
 	int temp;
 	KeySym ksym = XLookupKeysym(ev, 0);
 	if (ksym == XK_Control_L || ksym == XK_Control_R) {
@@ -812,9 +900,7 @@ keyrelease(XKeyEvent *ev)
 	}
 }
 
-static void
-paste(void)
-{
+static void paste() {
 	char *p, *q;
 	int di;
 	unsigned long dl;
@@ -830,9 +916,7 @@ paste(void)
 	drawmenu();
 }
 
-static void
-readstdin(void)
-{
+static void readstdin(void) {
 	char *line = NULL;
 	size_t i, itemsiz = 0, linesiz = 0;
 	ssize_t len;
@@ -856,6 +940,7 @@ readstdin(void)
 			if (!(items = realloc(items, itemsiz * sizeof(*items))))
 				die("cannot realloc %zu bytes:", itemsiz * sizeof(*items));
 		}
+		items[i].folder = items[i].file = 0;
 		items[i].hp = line[0] == hpchar;
 		if (!(items[i].text = strdup(line + items[i].hp)))
 			die("strdup:");
@@ -866,9 +951,7 @@ readstdin(void)
 	lines = MIN(lines, i);
 }
 
-static void
-run(void)
-{
+static void run(void) {
 	XEvent ev;
 
 	while (!XNextEvent(dpy, &ev)) {
@@ -906,9 +989,7 @@ run(void)
 	}
 }
 
-static void
-setup(void)
-{
+static void setup(void) {
 	int x, y, i = 0, j;
 	unsigned int du;
 	XSetWindowAttributes swa;
@@ -1025,18 +1106,14 @@ setup(void)
 	drawmenu();
 }
 
-static void
-usage(void)
-{
+static void usage(void) {
 	die("usage: dmenu [-bfiv] [-p prompt] [-fn font] [-m monitor]\n"
 	    "             [-l lines] [-g colums] [-w windowid] [-a alpha 0-255]\n"
 	    "             [-nb color] [-nf color] [-sb color] [-sf color]\n"
 	    "             [-nhb color] [-nhf color] [-shb color] [-shf color]");
 }
 
-int
-main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
 	XWindowAttributes wa;
 	int i, fast = 0;
 
@@ -1130,9 +1207,7 @@ main(int argc, char *argv[])
 	return 1; /* unreachable */
 }
 
-void
-xinitvisual()
-{
+void xinitvisual() {
 	XVisualInfo *infos;
 	XRenderPictFormat *fmt;
 	int nitems;
@@ -1160,7 +1235,7 @@ xinitvisual()
 
 	XFree(infos);
 
-	if (! visual) {
+	if (!visual) {
 		visual = DefaultVisual(dpy, screen);
 		depth = DefaultDepth(dpy, screen);
 		cmap = DefaultColormap(dpy, screen);
