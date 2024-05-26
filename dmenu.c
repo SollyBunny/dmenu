@@ -674,7 +674,7 @@ static void keypress(XKeyEvent *ev) {
 			goto draw;
 		case XK_Return:
 		case XK_KP_Enter:
-			docommand((sel && !(ev->state & ShiftMask)) ? sel->text : text, 1);
+			docommand(text);
 			cleanup();
 			exit(0);
 			break;
