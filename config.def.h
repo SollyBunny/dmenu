@@ -22,9 +22,9 @@ static float score_letter_match   = -32.0;   /* Score of each exact matching let
 static float score_letterci_match = -16.0;   /* Score of each matching letter, inclduing varying case */
 static float score_near_start     = -32.0;   /* Score of each letter near the start */
 static float score_continuous     = -2.0;    /* Score of each letter in a continuous match*/
-static float score_hp             = -8.0;    /* Score of a high priority match*/
-static float score_file           = -16.0;   /* Score of a match which is a file */
-static float score_folder         = -32.0;   /* Score of a match which is a folder*/
+static float score_hp             = -16.0;   /* Score of a high priority match*/
+static float score_file           = 8.0;     /* Score of a match which is a file */
+static float score_folder         = 8.0;     /* Score of a match which is a folder*/
 static float score_path           = -1024.0; /* Score of a file or folder when completing path */
 
 static const char hpchar = '*';
