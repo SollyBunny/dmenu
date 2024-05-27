@@ -26,7 +26,6 @@ LIBS = -L$(X11LIB) -lX11 $(XINERAMALIBS) $(FREETYPELIBS) -lXrender -lm
 # flags
 # DEBUGFLAGS = -O0 -g -fsanitize=address -fno-omit-frame-pointer
 CFLAGS = -std=c99 -D_POSIX_C_SOURCE=200809 -pedantic -Wall -DVERSION=\"$(VERSION)\" $(XINERAMAFLAGS) -O4 $(INCS) $(DEBUGFLAGS) 
-# CFLAGS = -std=c99 -pedantic -Wall
 LDFLAGS = $(LIBS) $(DEBUGFLAGS)
 
 # compiler and linker

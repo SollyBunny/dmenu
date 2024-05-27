@@ -45,6 +45,7 @@ enum { SchemeNorm, SchemeSel, SchemeNormHighlight, SchemeSelHighlight,
 
 struct item {
 	char *text;
+	unsigned int len;
 	struct item *left, *right;
 	double distance;
 	unsigned char hp : 1;
@@ -82,8 +83,9 @@ static Colormap cmap;
 
 #include "config.h"
 
-static int (*fstrncmp)(const char *, const char *, size_t) = strncmp;
-static char *(*fstrstr)(const char *, const char *) = strstr;
+static int (*fstrncmp)(const char *, const char *, size_t);
+static char *(*fstrstr)(const char *, const char *);
+
 static void xinitvisual();
 
 static unsigned int textw_clamp(const char *str, unsigned int n) {
@@ -96,6 +98,7 @@ static void freefilenames() {
 	for (struct item *it = files; it && it->text; ++it) {
 		free(it->text);
 		it->text = NULL;
+		it->len = 0;
 	}
 }
 
@@ -126,7 +129,9 @@ static void readfolder(const char *path) {
 				die("cannot realloc %zu bytes:", filesiz * sizeof(*files));
 		}
 		it = files + i;
-		it->text = strdup(ent->d_name);
+		it->len = strlen(ent->d_name);
+		if (!(it->text = malloc(it->len + 1))) die("malloc");
+		memcpy(it->text, ent->d_name, it->len + 1);
 		it->left = NULL;
 		it->right = NULL;
 		it->distance = 0;
@@ -181,8 +186,11 @@ static void cleanup(void) {
 	for (i = 0; items && items[i].text; ++i)
 		free(items[i].text);
 	free(items);
-	freefilenames();
-	free(files);
+	if (files) {
+		for (struct item *it = files; it && it->text; ++it)
+			free(it->text);
+		free(files);
+	}
 	drw_free(drw);
 	XSync(dpy, False);
 	XCloseDisplay(dpy);
@@ -191,7 +199,7 @@ static void cleanup(void) {
 static char *cistrstr(const char *h, const char *n) {
 	size_t i;
 	if (!n[0]) return (char *)h;
-	for (; *h; ++h) {
+	for (/* empty */; *h; ++h) {
 		for (i = 0; n[i] && tolower((unsigned char)n[i]) == tolower((unsigned char)h[i]); ++i) {}
 		if (n[i] == '\0')
 			return (char *)h;
@@ -253,7 +261,7 @@ static void recalculatenumbers() {
 static void drawmenu(void) {
 	unsigned int curpos;
 	struct item *item;
-	int x = 0, y = 0, w;
+	int x = 0, y = 0, w, tw;
 
 	drw_setscheme(drw, scheme[SchemeNorm]);
 	drw_rect(drw, 0, 0, mw, mh, 1, 1);
@@ -262,17 +270,27 @@ static void drawmenu(void) {
 		drw_setscheme(drw, scheme[SchemeSel]);
 		x = drw_text(drw, x, 0, promptw, bh, lrpad / 2, prompt, 0);
 	}
+	w = lines > 0 ? mw - x : inputw;
+	/* draw numbers */
+	recalculatenumbers();
+	drw_setscheme(drw, scheme[SchemeNorm]);
+	tw = TEXTW(numbers);
+	drw_text(drw, mw - tw, 0, tw, bh, lrpad / 2, numbers, 0);
+	w -= tw;
 	/* draw input field */
-	w = (lines > 0 || !matches) ? mw - x : inputw;
+	tw = TEXTW(text);
+	curpos = tw - TEXTW(&text[cursor]);
 	drw_setscheme(drw, scheme[ctrlpressed ? SchemeSel : SchemeNorm]);
-	drw_text(drw, x, 0, w, bh, lrpad / 2, text, 0);
-
-	curpos = TEXTW(text) - TEXTW(&text[cursor]);
+	if (tw > w) {
+		drw_text(drw, x, 0, w, bh, lrpad / 2 - (tw - w), text, 0);
+		curpos -= tw - w;
+	} else {
+		drw_text(drw, x, 0, w, bh, lrpad / 2, text, 0);
+	}
 	if ((curpos += lrpad / 2 - 1) < w) {
 		drw_setscheme(drw, scheme[SchemeNorm]);
-		drw_rect(drw, x + curpos, 2, 2, bh - 4, 1, 0);
+		drw_rect(drw, curpos, 2, 2, bh - 4, 1, 0);
 	}
-
 	// TODO put all of this into configs
 	char *search = text;
 	if (1) {
@@ -284,7 +302,6 @@ static void drawmenu(void) {
 		search = lastword;
 	}
 
-	recalculatenumbers();
 	if (lines > 0) {
 		w += x;
 		x = 0;
@@ -320,8 +337,6 @@ static void drawmenu(void) {
 			drw_text(drw, mw - w - TEXTW(numbers), 0, w, bh, lrpad / 2, ">", 0);
 		}
 	}
-	drw_setscheme(drw, scheme[SchemeNorm]);
-	drw_text(drw, mw - TEXTW(numbers), 0, TEXTW(numbers), bh, lrpad / 2, numbers, 0);
 	drw_map(drw, win, 0, 0, mw, mh);
 }
 
@@ -364,42 +379,45 @@ int compare_distance(const void *a, const void *b) {
 	return da->distance == db->distance ? 0 : da->distance < db->distance ? -1 : 1;
 }
 
-static inline void fuzzymatchdoitem(char *search, int search_len, struct item *it, int *number_of_matches) {
-	int itext_len;
-	char c;
-	int i, pidx, eidx, sidx;
+static inline void fuzzymatchdoitem(char *search, int search_len, struct item *it, int *number_of_matches, int matching_path) {
+	it->distance = 0;
 	if (search_len) {
-		itext_len = strlen(it->text);
-		pidx = 0; /* pointer */
-		sidx = eidx = -1; /* start of match, end of match */
-		/* walk through item text */
-		for (i = 0; i < itext_len && (c = it->text[i]); i++) {
-			/* fuzzy match pattern */
-			if (!fstrncmp(&search[pidx], &c, 1)) {
-				if(sidx == -1)
-					sidx = i;
-				pidx++;
-				if (pidx == search_len) {
-					eidx = i;
-					break;
-				}
+		if (search_len > it->len) return;
+		int i = 0, j = 0;
+		int match = 0;
+		int matchci = 0;
+		int matchdis = 0;
+		int matchcontinuous = 0;
+		int continuous = 0;
+		for (char *c = it->text; *c; ++c, ++j) {
+			if (search[i] == *c) {
+				match += 1; matchci += 1;
+				matchdis += j;
+				matchcontinuous += continuous;
+			} else if (!casesensitive && tolower(search[i]) == tolower(*c)) {
+				matchci += 1;
+				matchdis += j;
+				matchcontinuous += continuous;
+			} else {
+				continuous = 0;
+				continue;
 			}
+			++continuous;
+			++i;
 		}
-		/* build list of matches */
-		if (eidx != -1) {
-			/* compute distance */
-			/* add penalty if match starts late (log(sidx+2)) */
-			/* add penalty for long a match without many matching characters */
-			it->distance = log(sidx + 2) + (double)(eidx - sidx - search_len);
-			/* remove distance if high priority */
-			if (it->hp) it->distance -= hpcost;
-			/* fprintf(stderr, "distance %s %f\n", it->text, it->distance); */
-			appenditem(it, &matches, &matchend);
-			(*number_of_matches)++;
-		}
-	} else {
-		appenditem(it, &matches, &matchend);
+		if (search[i] != '\0') return;
+		if (match == it->len) it->distance += score_exact_match;
+		if (matchci == it->len) it->distance += score_close_match;
+		it->distance += (float)match * score_letter_match;
+		it->distance += (float)matchci * score_letterci_match;
+		it->distance += (float)matchcontinuous * score_continuous;
+		if (matchci > 0) it->distance -= (float)matchdis / (float)matchci / (float)it->len * score_near_start;
 	}
+	if (it->hp) it->distance += score_hp;
+	if (it->file) it->distance += it->folder ? score_folder : score_file;
+	if (it->file && matching_path) it->distance += score_path;
+	appenditem(it, &matches, &matchend);
+	(*number_of_matches)++;
 }
 
 void fuzzymatch(void) {
@@ -409,50 +427,47 @@ void fuzzymatch(void) {
 	int number_of_matches = 0, i;
 
 	// TODO put all of this into configs
-	char *search = text;
-	int search_len;
-	if (1) {
-		char *lastword = search;
-		for (/* empty */; *search; ++search) {
-			if (*search == ' ') lastword = search + 1;
-		}
-		search = lastword;
+	int matching_path = 0;
+	char *word = text;
+	char *base = text;
+	int base_len = 0;
+	for (char *c = text; *c; ++c) {
+		if (*c == ' ')
+			word = base = c + 1;
 	}
-	search_len = strlen(search);
+	for (char *c = base; *c; ++c) {
+		if (*c == '/') {
+			base = c + 1;
+			matching_path = 1;
+		}
+	}
+	base_len = strlen(base);
 
 	matches = matchend = NULL;
 
 	/* walk through all items */
 	for (it = items; it && it->text; ++it) {
-		fuzzymatchdoitem(search, search_len, it, &number_of_matches);
+		fuzzymatchdoitem(base, base_len, it, &number_of_matches, matching_path);
 	}
 
 	/* walk through directory */
 	if (1) {
 		char *path = NULL;
-		char *lastslash = NULL;
-		for (char *c = search; *c; ++c) {
-			if (*c == '/')
-				lastslash = c;
-		}
-		if (search[0] == '/') {
-			path = "/";
+		if (word[0] == '/') {
+			path = "";
 		} else {
 			if ((path = getenv("HOME")) == NULL)
 				if ((path = getpwuid(getuid())->pw_dir) == NULL)
-					path = "/";
+					path = "";
 		}
-		if (lastslash) {
+		if (matching_path) {
 			static char buf[512];
-			snprintf(buf, sizeof(buf), "%s/%.*s", path, (int)(lastslash - search), search);
+			snprintf(buf, sizeof buf, "%s/%.*s", path, (int)(base - word), word);
 			path = buf;
-			if (!path) path = "/";
-			search = lastslash + 1;
-			search_len = strlen(search);
 		}
 		readfolder(path);
 		for (it = files; it && it->text; ++it) {
-			fuzzymatchdoitem(search, search_len, it, &number_of_matches);
+			fuzzymatchdoitem(base, base_len, it, &number_of_matches, matching_path);
 		}
 	}
 
@@ -501,8 +516,6 @@ static void match(void) {
 	matches = lprefix = lsubstr = matchend = prefixend = substrend = NULL;
 	textsize = strlen(text) + 1;
 	for (item = items; item && item->text; item++) {
-		for (i = 0; i < tokc; i++)
-			if (!fstrstr(item->text, tokv[i]))
 				break;
 		if (i != tokc) /* not all tokens match */
 			continue;
@@ -569,36 +582,55 @@ static void movewordedge(int dir) {
 	}
 }
 
-static void docommand(char *cmd, int terminal) {
-	if (terminal) {
-		int format = 0;
-		for (char *p = TERMFORMAT; *p != '\0'; ++p) {
-			if (*p == '%') {
-				format = 1;
-			} else if (format == 1) {
-				if (*p == '%') {
-					putchar('%');
-				} else if (*p == 's') {
-					putchar('\'');
-					for (char *q = cmd; *q != '\0'; ++q) {
-						if (*q == '\'') {
-							putchar('\\');
-							putchar('\'');
-						} else {
-							putchar(*q);
-						}
-					}
-					putchar('\'');
-				}
-				format = 0;
-			} else {
-				putchar(*p);
+static void docommand(int forcetext, int terminal) {
+	char *cmd = NULL;
+	if (forcetext) {
+		cmd = text;
+	} else {
+		for (char *c = text; *c; ++c) {
+			if (*c == ' ') {
+				if (*(c + 1) == '\0')
+					*c = '\0';
+				else
+					cmd = text;
+				break;
+			} else if (*c == '/') {
+				cmd = text;
+				break;
 			}
 		}
-		if (format == 1) putchar('%');
-	} else {
-		fputs(cmd, stdout);
+		if (!cmd) {
+			if (sel && sel->text && sel->folder == 0)
+				cmd = sel->text;
+		}
 	}
+	char *format = terminal ? TERMFORMAT : CMDFORMAT;
+	int percentage = 0;
+	for (char *p = format; *p != '\0'; ++p) {
+		if (*p == '%') {
+			percentage = 1;
+		} else if (percentage == 1) {
+			if (*p == 's') {
+				fputs(cmd, stdout);
+			} else if (*p == 'e') {
+				for (char *q = cmd; *q != '\0'; ++q) {
+					if (*q == '\'') {
+						putchar('\\');
+						putchar('\'');
+					} else {
+						putchar(*q);
+					}
+				}
+			} else {
+				putchar('%');
+				putchar(*p);
+			}
+			percentage = 0;
+		} else {
+			putchar(*p);
+		}
+	}
+	if (percentage == 1) putchar('%');
 	putchar('\n');
 }
 
@@ -674,7 +706,7 @@ static void keypress(XKeyEvent *ev) {
 			goto draw;
 		case XK_Return:
 		case XK_KP_Enter:
-			docommand(text);
+			docommand(ev->state & ShiftMask, 1);
 			cleanup();
 			exit(0);
 			break;
@@ -812,7 +844,7 @@ insert:
 		break;
 	case XK_Return:
 	case XK_KP_Enter:
-		docommand((sel && !(ev->state & ShiftMask)) ? sel->text : text, 0);
+		docommand(ev->state & ShiftMask, 0);
 		cleanup();
 		exit(0);
 		break;
@@ -865,16 +897,16 @@ insert:
 			else if (*c == '/') lastslash = c;
 		}
 		lastslash = lastslash ? lastslash + 1 : text;
-		if (strcmp(matches->text, lastslash) == 0) goto addspace;
+		if (sel && strcmp(sel->text, lastslash) == 0) goto addspace;
 		if (sel->file) {
-			memcpy(lastslash, sel->text, strlen(sel->text));
+			memcpy(lastslash, sel->text, sel->len);
 			cursor = strnlen(text, sizeof text - 1);
 			if (sel->folder) {
 				memcpy(text + cursor, "/", 1);
 				cursor += 1;
 			}
 		} else {
-			memcpy(lastslash, sel->text, strlen(sel->text));
+			memcpy(lastslash, sel->text, sel->len);
 			cursor = strnlen(text, sizeof text - 1);
 		}
 		text[cursor] = '\0';
@@ -942,12 +974,15 @@ static void readstdin(void) {
 		}
 		items[i].folder = items[i].file = 0;
 		items[i].hp = line[0] == hpchar;
-		if (!(items[i].text = strdup(line + items[i].hp)))
-			die("strdup:");
+		items[i].len = strlen(line + items[i].hp);
+		if (!(items[i].text = malloc(items[i].len + 1))) die("malloc");
+		memcpy(items[i].text, line + items[i].hp, items[i].len + 1);
 	}
 	free(line);
-	if (items)
+	if (items) {
 		items[i].text = NULL;
+		items[i].len = 0;
+	}
 	lines = MIN(lines, i);
 }
 
@@ -1130,10 +1165,11 @@ int main(int argc, char *argv[]) {
 			fuzzy = 0;
 		else if (!strcmp(argv[i], "-c"))   /* centers dmenu on screen */
 			centered = 1;
-		else if (!strcmp(argv[i], "-i")) { /* case-insensitive item matching */
-			fstrncmp = strncasecmp;
-			fstrstr = cistrstr;
-		} else if (i + 1 == argc)
+		else if (!strcmp(argv[i], "-i"))   /* case-insensitive item matching */
+			casesensitive = 1;
+		else if (!strcmp(argv[i], "-I"))   /* case-sensitive item matching */
+			casesensitive = 0;
+		else if (i + 1 == argc)
 			usage();
 		/* these options take one argument */
 		else if (!strcmp(argv[i], "-g")) {   /* number of columns in grid */
@@ -1199,6 +1235,14 @@ int main(int argc, char *argv[]) {
 	} else {
 		readstdin();
 		grabkeyboard();
+	}
+
+	if (casesensitive) {
+		fstrncmp = strncmp;
+		fstrstr = strstr;
+	} else {
+		fstrncmp = strncasecmp;
+		fstrstr = cistrstr;
 	}
 	
 	setup();
