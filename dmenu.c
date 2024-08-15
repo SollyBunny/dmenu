@@ -217,17 +217,12 @@ static int drawitem(struct item *item, char *search, int x, int y, int w) {
 	drw_rect(drw, x, y, w, bh, 1, 1);
 	x += lrpad / 2;
 	w -= lrpad;
-	if (tw < w - ellipsis_w) {
-		tw = w / 2 - tw / 2;
-		w -= tw * 2;
-		x += tw;
-	} else {
-		w -= ellipsis_w;
-	}
+	if (tw + ellipsis_w < w)
+		x += w / 2 - tw / 2;
 	for (/* empty */; *itemtext != '\0'; ++itemtext) {
 		temp[0] = itemtext[0];
 		tw = TEXTW(temp) - lrpad;
-		if (tw > w) {
+		if (tw + ellipsis_w > w) {
 			drw_setscheme(drw, scheme[item == sel ? SchemeSel : SchemeNorm]);
 			x = drw_text(drw, x, y, ellipsis_w, bh, 0, "...", 0);
 			break;
@@ -393,25 +388,26 @@ static inline void fuzzymatchdoitem(char *search, int search_len, struct item *i
 			if (search[i] == *c) {
 				match += 1; matchci += 1;
 				matchdis += j;
-				matchcontinuous += continuous;
 			} else if (!casesensitive && tolower(search[i]) == tolower(*c)) {
 				matchci += 1;
 				matchdis += j;
-				matchcontinuous += continuous;
 			} else {
+				matchcontinuous += continuous;
 				continuous = 0;
+				++j;
 				continue;
 			}
 			++continuous;
-			++i;
+			++i; ++j;
 		}
+		matchcontinuous += continuous;
 		if (search[i] != '\0') return;
-		if (match == it->len) it->distance += score_exact_match;
-		if (matchci == it->len) it->distance += score_close_match;
 		it->distance += (float)match * score_letter_match;
 		it->distance += (float)matchci * score_letterci_match;
 		it->distance += (float)matchcontinuous * score_continuous;
-		if (matchci > 0) it->distance -= (float)matchdis / (float)matchci / (float)it->len * score_near_start;
+		if (matchci > 0) it->distance -= (float)matchdis * score_near_start;
+		if (match == it->len) it->distance += score_exact_match;
+		if (matchci == it->len) it->distance += score_close_match;
 	}
 	if (it->hp) it->distance += score_hp;
 	if (it->file) it->distance += it->folder ? score_folder : score_file;

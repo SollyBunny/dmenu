@@ -43,8 +43,8 @@ static const char *colors[SchemeLast][2] = {
 	/*     fg         bg       */
 	[SchemeNorm] = { "#bbbbbb", "#222222" },
 	[SchemeSel] = { "#eeeeee", "#005577" },
-	[SchemeSelHighlight] = { "#ffc978", "#005577" },
-	[SchemeNormHighlight] = { "#ffc978", "#222222" }
+	[SchemeSelHighlight] = { "#c978ff", "#005577" },
+	[SchemeNormHighlight] = { "#c978ff", "#222222" }
 };
 
 /* -l and -g options; controls number of lines and columns in grid if > 0 */
