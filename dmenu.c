@@ -211,7 +211,7 @@ static int drawitem(struct item *item, char *search, int x, int y, int w) {
 	char *itemtext = item->text;
 	char *inputtext = search;
 	char temp[2] = " ";
-	int ellipsis_w = TEXTW("...") - lrpad;
+	int ellipsis_w = TEXTW("…") - lrpad;
 	int tw = TEXTW(itemtext) - lrpad;
 	drw_setscheme(drw, scheme[item == sel ? SchemeSel : SchemeNorm]);
 	drw_rect(drw, x, y, w, bh, 1, 1);
@@ -224,7 +224,7 @@ static int drawitem(struct item *item, char *search, int x, int y, int w) {
 		tw = TEXTW(temp) - lrpad;
 		if (tw + ellipsis_w > w) {
 			drw_setscheme(drw, scheme[item == sel ? SchemeSel : SchemeNorm]);
-			x = drw_text(drw, x, y, ellipsis_w, bh, 0, "...", 0);
+			x = drw_text(drw, x, y, ellipsis_w, bh, 0, "…", 0);
 			break;
 		} else {
 			if (*inputtext != '\0' && fstrncmp(itemtext, inputtext, 1) == 0) {
